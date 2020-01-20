@@ -206,7 +206,8 @@ def main_worker(gpu, ngpus_per_node, args):
             acc1 = validate(val_loader, model, criterion, args,
                             prefix='[worker '+str(args.rank)+']')
         elif args.method.startswith('ef-'):
-            pass
+            acc1 = validate(val_loader, model, criterion, args,
+                            prefix='[worker '+str(args.rank)+']')
         elif args.method.startswith('r-'):
             acc1 = validate(val_loader, model, criterion, args,
                             prefix='[worker '+str(args.rank)+'][dist-r]')
@@ -241,6 +242,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
             prefix="Epoch: [{}]".format(epoch))
 
     p_names = [name for name, p in model.named_parameters()]
+    old_p = [p.data.clone().detach() for p in model.parameters()]
+    delta_p = [p.data.clone().detach().zero_() for p in model.parameters()]
 
     # switch to train mode
     model.train()
@@ -256,9 +259,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
 
         # step ahead in dist-rsgd
         if args.method.startswith('r-'):
-            old_p = [p.data.clone().detach() for p in model.parameters()]
-            delta_p = [p.data.clone().detach().zero_() for p in model.parameters()]
-
             for idx, p in enumerate(model.parameters()):
                 if args.reset_period and\
                     (i+1 % args.reset_period == 0 or i == len(train_loader)-1):
@@ -295,7 +295,20 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                 optimizer.step()
 
             elif args.method.startswith('ef-'):
-                pass
+                optimizer.step()
+                for idx, p in enumerate(model.parameters()):
+                    delta_p[idx] = old_p[idx] - p.data + residuals[idx]
+
+                # compress delta_p
+                func = compression.__dict__[args.method[3:]]
+                func(delta_p, topk=args.topk)
+
+                for idx, p in enumerate(model.parameters()):
+                    residuals[idx] = (old_p[idx] - p.data + residuals[idx]) - delta_p[idx]
+                    dist.all_reduce(delta_p[idx], op=dist.ReduceOp.SUM)
+                    delta_p[idx] /= args.world_size
+                    p.data.copy_(old_p[idx] - delta_p[idx])
+                    old_p[idx].copy_(p.data)
 
             elif args.method.startswith('r-'):
                 optimizer.step()
@@ -309,9 +322,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                     dist.reduce(delta_p[idx], dst=args.root, op=dist.ReduceOp.SUM)
                     if args.rank == args.root:
                         delta_p[idx] /= args.world_size
-
-                if args.rank == args.root and args.compress_back:
-                    func(delta_p, topk=args.topk)
+                #if args.rank == args.root and args.compress_back:
+                #    func(delta_p, topk=args.topk)
                 for idx, p in enumerate(model.parameters()):
                     dist.broadcast(delta_p[idx], src=args.root)
 
@@ -319,6 +331,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                 for idx, p in enumerate(model.parameters()):
                     residuals[idx] = (old_p[idx] - p.data) - delta_p[idx]
                     p.data.copy_(old_p[idx] - delta_p[idx])
+                    old_p[idx].copy_(p.data)
 
                 if args.eval_r:
                     model.eval()
@@ -339,7 +352,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
             if args.method.startswith('va'):
                 progress.display(i, prefix='[worker '+str(args.rank)+']')
             elif args.method.startswith('ef-'):
-                pass
+                progress.display(i, prefix='[worker '+str(args.rank)+']')
             elif args.method.startswith('r-'):
                 if args.eval_r:
                     progress_r.display(i, prefix='[worker '+str(args.rank)+'][dist-r]')
