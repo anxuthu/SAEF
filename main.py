@@ -67,6 +67,8 @@ parser.add_argument('-k', '--topk', default=0.1, type=float,
                     help='K in topk.')
 parser.add_argument('-cb', '--compress-back', action='store_true',
                     help='compress the message the server sends back')
+parser.add_argument('-sec', '--server-error-compensate', action='store_true',
+                    help='server error compensation')
 parser.add_argument('--eval-ref', action='store_true',
                     help='evaluate validation of reference point')
 parser.add_argument('--eval-r', action='store_true',
@@ -190,6 +192,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # residuals for dist-rsgd
     residuals = [p.data.clone().detach().zero_() for p in model.parameters()]
+    s_residuals = [p.data.clone().detach().zero_() for p in model.parameters()]
 
     for epoch in range(args.epochs):
         train_sampler.set_epoch(epoch)
@@ -199,7 +202,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, args,
-              residuals, val_loader)
+              residuals, s_residuals, val_loader)
 
         # evaluate on validation set
         if args.method.startswith('va'):
@@ -221,7 +224,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args,
-          residuals, val_loader):
+          residuals, s_residuals, val_loader):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -315,7 +318,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                 for idx, p in enumerate(model.parameters()):
                     delta_p[idx] = old_p[idx] - p.data
 
-                # compress delta_p
+                # compress delta_p, send to server
                 func = compression.__dict__[args.method[2:]]
                 func(delta_p, topk=args.topk)
                 for idx, p in enumerate(model.parameters()):
@@ -323,11 +326,21 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                     dist.reduce(delta_p[idx], dst=args.root, op=dist.ReduceOp.SUM)
                     if args.rank == args.root:
                         delta_p[idx] /= args.world_size
+
+                # compress at server side, broadcast back
                 if args.rank == args.root and args.compress_back:
+                    if args.server_error_compensate:
+                        for idx, p in enumerate(model.parameters()):
+                            s_residuals[idx] += delta_p[idx]
+                            delta_p[idx].copy_(s_residuals[idx])
                     func(delta_p, topk=args.topk)
+                    if args.server_error_compensate:
+                        for idx, p in enumerate(model.parameters()):
+                            s_residuals[idx] -= delta_p[idx]
                 for idx, p in enumerate(model.parameters()):
                     dist.broadcast(delta_p[idx], src=args.root)
 
+                # update at worker side
                 for idx, p in enumerate(model.parameters()):
                     p.data.copy_(old_p[idx] - delta_p[idx])
                     old_p[idx].copy_(p.data)
