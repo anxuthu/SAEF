@@ -319,17 +319,16 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                 func = compression.__dict__[args.method[2:]]
                 func(delta_p, topk=args.topk)
                 for idx, p in enumerate(model.parameters()):
+                    residuals[idx] = (old_p[idx] - p.data) - delta_p[idx]
                     dist.reduce(delta_p[idx], dst=args.root, op=dist.ReduceOp.SUM)
                     if args.rank == args.root:
                         delta_p[idx] /= args.world_size
-                #if args.rank == args.root and args.compress_back:
-                #    func(delta_p, topk=args.topk)
+                if args.rank == args.root and args.compress_back:
+                    func(delta_p, topk=args.topk)
                 for idx, p in enumerate(model.parameters()):
                     dist.broadcast(delta_p[idx], src=args.root)
 
-                # update residuals and parameters
                 for idx, p in enumerate(model.parameters()):
-                    residuals[idx] = (old_p[idx] - p.data) - delta_p[idx]
                     p.data.copy_(old_p[idx] - delta_p[idx])
                     old_p[idx].copy_(p.data)
 
@@ -343,6 +342,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                     top1_r.update(acc1_r[0], images.size(0))
                     top5_r.update(acc5_r[0], images.size(0))
                     model.train()
+
+            else:
+                assert False
 
         # measure elapsed time
         batch_time.update(time.time() - end)
