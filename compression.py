@@ -1,4 +1,4 @@
-__all__ = ['Sign', 'TopK']
+__all__ = ['Sign', 'TopK', 'USpar']
 
 def Sign(params, **kwargs):
     r"""Scaled sign compression.
@@ -22,12 +22,26 @@ def TopK(params, **kwargs):
 
     Args:
         params (iterable): iterable of torch.tensor
-        topk (int): the K in top-k
+        spar (float): the top ?% (sparsity)
     """
 
-    topk = kwargs['topk']
+    spar = kwargs['spar']
     for p in params:
-        k = max(1, int(p.numel() * topk))
+        k = max(1, int(p.numel() * spar))
         vals, indices = p.view(-1).abs().topk(k)
         p_sign = p.sign()
         p.zero_().view(-1).scatter_(0, indices, vals).mul_(p_sign.view(-1))
+
+
+def USpar(params, **kwargs):
+    r"""Unbiased gradient sparsification.
+
+    Args:
+        params (iterable): iterable of torch.tensor
+        spar (float): the probability to send a gradient element (sparsity)
+    """
+
+    spar = kwargs['spar']
+    for p in params:
+        mask = p.clone().uniform_(0,1).le_(spar)
+        p.mul_(mask).mul_(1.0/spar)

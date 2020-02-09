@@ -59,12 +59,15 @@ parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 
 parser.add_argument('--method', default='va', type=str,
-                    help='choose from (va, va-Sign, va-TopK, ' +
-                        'ef-Sign, ef-TopK, r-Sign, r-TopK)')
+                    help='choose from (va, va-Sign, va-TopK, va-USpar, ' +
+                                       'ef-Sign, ef-TopK, ef-USpar ' +
+                                       'r-Sign, r-TopK, r-USpar,)')
+parser.add_argument('--spar', default=0.1, type=float,
+                    help='sparsity.')
 parser.add_argument('-rp', '--reset-period', default=0, type=int,
-                    help='reset period')
-parser.add_argument('-k', '--topk', default=0.1, type=float,
-                    help='K in topk.')
+                    help='reset residuals period')
+parser.add_argument('-ap', '--average-period', default=0, type=int,
+                    help='arverage residuals period')
 parser.add_argument('-cb', '--compress-back', action='store_true',
                     help='compress the message the server sends back')
 parser.add_argument('-sec', '--server-error-compensate', action='store_true',
@@ -266,6 +269,14 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                 if args.reset_period and\
                     (i+1 % args.reset_period == 0 or i == len(train_loader)-1):
                     residuals[idx].zero_()
+
+                if args.average_period:
+                    cur_iter = epoch * len(train_loader) + i
+                    if i+1 % args.average_period == 0:
+                        for res_ in residuals:
+                            dist.all_reduce(res_, op=dist.ReduceOp.SUM)
+                            res_ /= args.world_size
+
                 p.data.sub_(residuals[idx])
 
         if args.eval_ref and args.method.startswith('r-') and i == len(train_loader)-1:
@@ -291,20 +302,20 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                 if not k in p_names: # broadcast buffers from rank 0
                     dist.broadcast(v.data, src=args.root)
 
-            if args.method.startswith('va'):
+            if args.method.startswith('va'): #TODO: compression
                 for p in model.parameters():
                     dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
                     p.grad /= args.world_size
                 optimizer.step()
 
-            elif args.method.startswith('ef-'):
+            elif args.method.startswith('ef-'): #TODO: compress back
                 optimizer.step()
                 for idx, p in enumerate(model.parameters()):
                     delta_p[idx] = old_p[idx] - p.data + residuals[idx]
 
                 # compress delta_p
                 func = compression.__dict__[args.method[3:]]
-                func(delta_p, topk=args.topk)
+                func(delta_p, spar=args.spar)
 
                 for idx, p in enumerate(model.parameters()):
                     residuals[idx] = (old_p[idx] - p.data + residuals[idx]) - delta_p[idx]
@@ -320,7 +331,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
 
                 # compress delta_p, send to server
                 func = compression.__dict__[args.method[2:]]
-                func(delta_p, topk=args.topk)
+                func(delta_p, spar=args.spar)
                 for idx, p in enumerate(model.parameters()):
                     residuals[idx] = (old_p[idx] - p.data) - delta_p[idx]
                     dist.reduce(delta_p[idx], dst=args.root, op=dist.ReduceOp.SUM)
@@ -333,7 +344,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                         for idx, p in enumerate(model.parameters()):
                             s_residuals[idx] += delta_p[idx]
                             delta_p[idx].copy_(s_residuals[idx])
-                    func(delta_p, topk=args.topk)
+                    func(delta_p, spar=args.spar)
                     if args.server_error_compensate:
                         for idx, p in enumerate(model.parameters()):
                             s_residuals[idx] -= delta_p[idx]
@@ -345,6 +356,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                     p.data.copy_(old_p[idx] - delta_p[idx])
                     old_p[idx].copy_(p.data)
 
+                # evaluate training of ref
                 if args.eval_r:
                     model.eval()
                     output_r = model(images)
