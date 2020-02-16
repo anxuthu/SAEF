@@ -58,10 +58,12 @@ parser.add_argument('--dist-backend', default='nccl', type=str,
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 
+
+
 parser.add_argument('--method', default='va', type=str,
-                    help='choose from (va, va-Sign, va-TopK, va-USpar, ' +
-                                       'ef-Sign, ef-TopK, ef-USpar ' +
-                                       'r-Sign, r-TopK, r-USpar,)')
+                    help='choose from (va, va-Sign, va-TopK, va-GSpar, ' +
+                                          'ef-Sign, ef-TopK, ef-GSpar, ' +
+                                           'r-Sign,  r-TopK,  r-GSpar)')
 parser.add_argument('--spar', default=0.1, type=float,
                     help='sparsity.')
 parser.add_argument('-rp', '--reset-period', default=0, type=int,
@@ -142,9 +144,11 @@ def main_worker(gpu, ngpus_per_node, args):
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
-    optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
+    #optimizer = torch.optim.SGD(model.parameters(), args.lr,
+    #                            momentum=args.momentum,
+    #                            weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adagrad(model.parameters(), args.lr,
+                                    weight_decay=args.weight_decay)
 
     cudnn.benchmark = True
 
@@ -279,10 +283,10 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
 
                 p.data.sub_(residuals[idx])
 
-        if args.eval_ref and args.method.startswith('r-') and i == len(train_loader)-1:
-            validate(val_loader, model, criterion, args,
-                     prefix='[worker '+str(args.rank)+'][ref]')
-            model.train()
+            if args.eval_ref and i == len(train_loader)-1: # validate ref (auxiliary)
+                validate(val_loader, model, criterion, args,
+                         prefix='[worker '+str(args.rank)+'][ref]')
+                model.train()
 
         # compute output
         output = model(images)
@@ -299,28 +303,56 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
 
         with torch.no_grad():
             for k, v in model.state_dict().items():
-                if not k in p_names: # broadcast buffers from rank 0
+                if not k in p_names: # broadcast non-param buffers from rank 0
                     dist.broadcast(v.data, src=args.root)
 
-            if args.method.startswith('va'): #TODO: compression
+            if args.method.startswith('va'):
+                # compress
+                if args.method.startswith('va-'):
+                    func = compression.__dict__[args.method[3:]]
+                    func([p.grad for p in model.parameters()], spar=args.spar)
+                # reduce
                 for p in model.parameters():
-                    dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
-                    p.grad /= args.world_size
+                    dist.reduce(p.grad, dst=args.root, op=dist.ReduceOp.SUM)
+                    if args.rank == args.root:
+                        p.grad /= args.world_size
+                # compress back
+                if args.compress_back and args.method.startswith('va-') and args.rank == args.root:
+                    func([p.grad for p in model.parameters()], spar=args.spar)
+                # broadcast
+                for p in model.parameters():
+                    dist.broadcast(p.grad, src=args.root)
                 optimizer.step()
 
-            elif args.method.startswith('ef-'): #TODO: compress back
+            elif args.method.startswith('ef-'):
                 optimizer.step()
                 for idx, p in enumerate(model.parameters()):
                     delta_p[idx] = old_p[idx] - p.data + residuals[idx]
 
-                # compress delta_p
+                # compress delta_p, send to server
                 func = compression.__dict__[args.method[3:]]
                 func(delta_p, spar=args.spar)
-
                 for idx, p in enumerate(model.parameters()):
                     residuals[idx] = (old_p[idx] - p.data + residuals[idx]) - delta_p[idx]
-                    dist.all_reduce(delta_p[idx], op=dist.ReduceOp.SUM)
-                    delta_p[idx] /= args.world_size
+                    dist.reduce(delta_p[idx], dst=args.root, op=dist.ReduceOp.SUM)
+                    if args.rank == args.root:
+                        delta_p[idx] /= args.world_size
+
+                # compress at server side, broadcast back
+                if args.rank == args.root and args.compress_back:
+                    if args.server_error_compensate:
+                        for idx, p in enumerate(model.parameters()):
+                            s_residuals[idx] += delta_p[idx]
+                            delta_p[idx].copy_(s_residuals[idx])
+                    func(delta_p, spar=args.spar)
+                    if args.server_error_compensate:
+                        for idx, p in enumerate(model.parameters()):
+                            s_residuals[idx] -= delta_p[idx]
+                for idx, p in enumerate(model.parameters()):
+                    dist.broadcast(delta_p[idx], src=args.root)
+
+                # update at worker side
+                for idx, p in enumerate(model.parameters()):
                     p.data.copy_(old_p[idx] - delta_p[idx])
                     old_p[idx].copy_(p.data)
 

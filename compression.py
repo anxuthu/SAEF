@@ -33,7 +33,7 @@ def TopK(params, **kwargs):
         p.zero_().view(-1).scatter_(0, indices, vals).mul_(p_sign.view(-1))
 
 
-def USpar(params, **kwargs):
+def GSpar(params, **kwargs):
     r"""Unbiased gradient sparsification.
 
     Args:
@@ -43,5 +43,5 @@ def USpar(params, **kwargs):
 
     spar = kwargs['spar']
     for p in params:
-        mask = p.clone().uniform_(0,1).le_(spar)
-        p.mul_(mask).mul_(1.0/spar)
+        mask = p.clone().uniform_(0,1).le_(spar).float().mul_(1.0 / spar)
+        p.mul_(mask)
