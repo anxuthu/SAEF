@@ -39,6 +39,8 @@ parser.add_argument('--lr', default=0.1, type=float,
                     help='initial learning rate')
 parser.add_argument('-ds', '--decay-schedule', type=int, nargs='+', default=[100,150],
                     help='learning rate decaying epochs')
+parser.add_argument('-opt', '--optimizer', type=str, default='sgd',
+                    help='choose from (sgd, adagrad)')
 parser.add_argument('--momentum', default=0.9, type=float,
                     help='momentum')
 parser.add_argument('-wd', '--weight-decay', default=5e-4, type=float,
@@ -144,11 +146,15 @@ def main_worker(gpu, ngpus_per_node, args):
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
 
-    #optimizer = torch.optim.SGD(model.parameters(), args.lr,
-    #                            momentum=args.momentum,
-    #                            weight_decay=args.weight_decay)
-    optimizer = torch.optim.Adagrad(model.parameters(), args.lr,
+    if args.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(model.parameters(), args.lr,
+                                    momentum=args.momentum,
                                     weight_decay=args.weight_decay)
+    elif args.optimizer == 'adagrad':
+        optimizer = torch.optim.Adagrad(model.parameters(), args.lr,
+                                        weight_decay=args.weight_decay)
+    else:
+        assert False
 
     cudnn.benchmark = True
 
@@ -324,6 +330,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                     dist.broadcast(p.grad, src=args.root)
                 optimizer.step()
 
+
             elif args.method.startswith('ef-'):
                 optimizer.step()
                 for idx, p in enumerate(model.parameters()):
@@ -355,6 +362,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                 for idx, p in enumerate(model.parameters()):
                     p.data.copy_(old_p[idx] - delta_p[idx])
                     old_p[idx].copy_(p.data)
+
 
             elif args.method.startswith('r-'):
                 optimizer.step()
@@ -399,6 +407,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                     top1_r.update(acc1_r[0], images.size(0))
                     top5_r.update(acc5_r[0], images.size(0))
                     model.train()
+
 
             else:
                 assert False
@@ -505,6 +514,8 @@ class ProgressMeter(object):
 
 
 def adjust_learning_rate(optimizer, epoch, args):
+    assert len(args.decay_schedule) >= 2
+
     if epoch < args.decay_schedule[0]:
         lr = args.lr
     elif epoch < args.decay_schedule[1]:
