@@ -204,6 +204,7 @@ def main_worker(gpu, ngpus_per_node, args):
         num_workers=args.workers, pin_memory=True)
 
     # residuals for dist-rsgd
+    old_p = [p.data.clone().detach().zero_() for p in model.parameters()]
     residuals = [p.data.clone().detach().zero_() for p in model.parameters()]
     s_residuals = [p.data.clone().detach().zero_() for p in model.parameters()]
 
@@ -215,7 +216,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, args,
-              residuals, s_residuals, val_loader)
+              old_p, residuals, s_residuals, val_loader)
 
         # evaluate on validation set
         if args.method.startswith('va'):
@@ -237,7 +238,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args,
-          residuals, s_residuals, val_loader):
+          old_p, residuals, s_residuals, val_loader):
     batch_time = AverageMeter('Time', ':6.3f')
     data_time = AverageMeter('Data', ':6.3f')
     losses = AverageMeter('Loss', ':.4e')
@@ -258,7 +259,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
             prefix="Epoch: [{}]".format(epoch))
 
     p_names = [name for name, p in model.named_parameters()]
-    old_p = [p.data.clone().detach() for p in model.parameters()]
     delta_p = [p.data.clone().detach().zero_() for p in model.parameters()]
 
     # switch to train mode
