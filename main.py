@@ -267,6 +267,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
     end = time.time()
     for i, (images, target) in enumerate(train_loader):
         # measure data loading time
+        cur_iter = i + epoch * len(train_loader)
         data_time.update(time.time() - end)
 
         images = images.cuda(args.gpu, non_blocking=True)
@@ -276,16 +277,13 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
         # step ahead in dist-rsgd
         if args.method.startswith('r-'):
             for idx, p in enumerate(model.parameters()):
-                if args.reset_period and\
-                    (i+1 % args.reset_period == 0 or i == len(train_loader)-1):
+                if args.reset_period and (cur_iter+1) % args.reset_period == 0:
                     residuals[idx].zero_()
 
-                if args.average_period:
-                    cur_iter = epoch * len(train_loader) + i
-                    if i+1 % args.average_period == 0:
-                        for res_ in residuals:
-                            dist.all_reduce(res_, op=dist.ReduceOp.SUM)
-                            res_ /= args.world_size
+                if args.average_period and (cur_iter+1) % args.average_period == 0:
+                    for res_ in residuals:
+                        dist.all_reduce(res_, op=dist.ReduceOp.SUM)
+                        res_ /= args.world_size
 
                 p.data.sub_(residuals[idx])
 
