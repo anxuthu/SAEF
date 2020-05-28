@@ -76,9 +76,9 @@ parser.add_argument('-cb', '--compress-back', action='store_true',
                     help='compress the message the server sends back')
 parser.add_argument('-sec', '--server-error-compensate', action='store_true',
                     help='server error compensation')
-parser.add_argument('--eval-ref', action='store_true',
-                    help='evaluate validation of reference point')
-parser.add_argument('--eval-r', action='store_true',
+parser.add_argument('--eval-aux', action='store_true',
+                    help='evaluate validation of auxiliary point')
+parser.add_argument('--eval-distr', action='store_true',
                     help='evalueate training of dist-r point')
 
 best_acc1 = 0
@@ -203,7 +203,7 @@ def main_worker(gpu, ngpus_per_node, args):
         val_dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
-    # residuals for dist-rsgd
+    # residuals for dist-r
     old_p = [p.data.clone().detach().zero_() for p in model.parameters()]
     residuals = [p.data.clone().detach().zero_() for p in model.parameters()]
     s_residuals = [p.data.clone().detach().zero_() for p in model.parameters()]
@@ -249,7 +249,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
         [batch_time, data_time, losses, top1, top5],
         prefix="Epoch: [{}]".format(epoch))
 
-    if args.eval_r:
+    if args.eval_distr:
         losses_r = AverageMeter('Loss', ':.4e')
         top1_r = AverageMeter('Acc@1', ':6.2f')
         top5_r = AverageMeter('Acc@5', ':6.2f')
@@ -257,6 +257,16 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
             len(train_loader),
             [batch_time, data_time, losses_r, top1_r, top5_r],
             prefix="Epoch: [{}]".format(epoch))
+
+    if args.eval_aux:
+        losses_a = AverageMeter('Loss', ':.4e')
+        top1_a = AverageMeter('Acc@1', ':6.2f')
+        top5_a = AverageMeter('Acc@5', ':6.2f')
+        progress_a = ProgressMeter(
+            len(train_loader),
+            [batch_time, data_time, losses_a, top1_a, top5_a],
+            prefix="Epoch: [{}]".format(epoch))
+        aux_residuals = [p.data.clone().detach().zero_() for p in model.parameters()]
 
     p_names = [name for name, p in model.named_parameters()]
     delta_p = [p.data.clone().detach().zero_() for p in model.parameters()]
@@ -274,22 +284,54 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
         target = target.cuda(args.gpu, non_blocking=True)
         optimizer.zero_grad()
 
-        # step ahead in dist-rsgd
+        # step ahead in dist-r
         if args.method.startswith('r-'):
-            for idx, p in enumerate(model.parameters()):
-                if args.reset_period and (cur_iter+1) % args.reset_period == 0:
-                    residuals[idx].zero_()
+            with torch.no_grad():
+                # evaluate training of dist-r point
+                if args.eval_distr:
+                    model.eval()
+                    output_r = model(images)
+                    loss_r = criterion(output_r, target)
+                    acc1_r, acc5_r = accuracy(output_r, target, topk=(1, 5))
 
-                if args.average_period and (cur_iter+1) % args.average_period == 0:
-                    for res_ in residuals:
-                        dist.all_reduce(res_, op=dist.ReduceOp.SUM)
-                        res_ /= args.world_size
+                    losses_r.update(loss_r.item(), images.size(0))
+                    top1_r.update(acc1_r[0], images.size(0))
+                    top5_r.update(acc5_r[0], images.size(0))
+                    model.train()
 
-                p.data.sub_(residuals[idx])
+                for idx, p in enumerate(model.parameters()):
+                    if args.reset_period and (cur_iter+1) % args.reset_period == 0:
+                        residuals[idx].zero_()
 
-            if args.eval_ref and i == len(train_loader)-1: # validate ref (auxiliary)
-                validate(val_loader, model, criterion, args,
-                         prefix='[worker '+str(args.rank)+'][ref]')
+                    if args.average_period and (cur_iter+1) % args.average_period == 0:
+                        dist.all_reduce(residuals[idx], op=dist.ReduceOp.SUM)
+                        residuals[idx] /= args.world_size
+
+                    p.data.sub_(residuals[idx])
+
+        # only server evaluate auxiliary variable
+        if args.eval_aux:
+            with torch.no_grad():
+                for idx, res_ in enumerate(aux_residuals):
+                    res_.copy_(residuals[idx])
+                    dist.reduce(res_, dst=args.root, op=dist.ReduceOp.SUM)
+                    res_.div_(args.world_size).add_(s_residuals[idx])
+                    dist.broadcast(res_, src=args.root)
+
+                model.eval()
+                for idx, p in enumerate(model.parameters()):
+                    p.data.sub_(aux_residuals[idx])
+
+                output_a = model(images)
+                loss_a = criterion(output_a, target)
+                acc1_a, acc5_a = accuracy(output_a, target, topk=(1, 5))
+
+                losses_a.update(loss_a.item(), images.size(0))
+                top1_a.update(acc1_a[0], images.size(0))
+                top5_a.update(acc5_a[0], images.size(0))
+
+                for idx, p in enumerate(model.parameters()):
+                    p.data.add_(aux_residuals[idx])
                 model.train()
 
         # compute output
@@ -394,19 +436,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                     p.data.copy_(old_p[idx] - delta_p[idx])
                     old_p[idx].copy_(p.data)
 
-                # evaluate training of ref
-                if args.eval_r:
-                    model.eval()
-                    output_r = model(images)
-                    loss_r = criterion(output_r, target)
-                    acc1_r, acc5_r = accuracy(output_r, target, topk=(1, 5))
-
-                    losses_r.update(loss_r.item(), images.size(0))
-                    top1_r.update(acc1_r[0], images.size(0))
-                    top5_r.update(acc5_r[0], images.size(0))
-                    model.train()
-
-
             else:
                 assert False
 
@@ -420,9 +449,12 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
             elif args.method.startswith('ef-'):
                 progress.display(i, prefix='[worker '+str(args.rank)+']')
             elif args.method.startswith('r-'):
-                if args.eval_r:
+                if args.eval_distr:
                     progress_r.display(i, prefix='[worker '+str(args.rank)+'][dist-r]')
                 progress.display(i, prefix='[worker '+str(args.rank)+'][ref]')
+
+            if args.eval_aux:
+                progress_a.display(i, prefix='[worker '+str(args.rank)+'][aux]')
 
 
 def validate(val_loader, model, criterion, args, prefix=''):
