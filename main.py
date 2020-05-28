@@ -5,6 +5,7 @@ import random
 import shutil
 import time
 import warnings
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -262,9 +263,11 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
         losses_a = AverageMeter('Loss', ':.4e')
         top1_a = AverageMeter('Acc@1', ':6.2f')
         top5_a = AverageMeter('Acc@5', ':6.2f')
+        err_a = AverageMeter('Err', ':.4e')
+        err_r_a = AverageMeter('Err-R', ':.4e')
         progress_a = ProgressMeter(
             len(train_loader),
-            [batch_time, data_time, losses_a, top1_a, top5_a],
+            [batch_time, data_time, losses_a, top1_a, top5_a, err_a, err_r_a],
             prefix="Epoch: [{}]".format(epoch))
         aux_residuals = [p.data.clone().detach().zero_() for p in model.parameters()]
 
@@ -332,6 +335,17 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
 
                 for idx, p in enumerate(model.parameters()):
                     p.data.add_(aux_residuals[idx])
+
+                # compression error
+                err_a.update(np.sum([res_.pow(2).sum().item() for res_ in aux_residuals]), images.size(0))
+                local = 0
+                for idx, res_ in enumerate(aux_residuals):
+                    res_.sub_(residuals[idx])
+                    local_ = res_.pow(2).sum()
+                    dist.all_reduce(local_, op=dist.ReduceOp.SUM)
+                    local += local_.item() / args.world_size
+                err_r_a.update(local, images.size(0))
+
                 model.train()
 
         # compute output
