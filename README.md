@@ -1,5 +1,5 @@
 # SAEF
-Step-ahead local error feedback.
+Step-ahead local error feedback for communication-efficient distributed training.
 
 ## Software Requirements
 
@@ -17,4 +17,4 @@ Python 3 and PyTorch 1.4
 
 + SGDM: `NCCL_IB_DISABLE=1 python main.py --dataset imagenet --data /export/Data/ILSVRC2012/ -p 5005 -a resnet50 -wd 1e-4 --epochs 90 -ds 30 60 -b 256 --method va --spar 0.1 -cb -sec`
 + EF-SGDM: `NCCL_IB_DISABLE=1 python main.py --dataset imagenet --data /export/Data/ILSVRC2012/ -p 5005 -a resnet50 -wd 1e-4 --epochs 90 -ds 30 60 -b 256 --method ef-TopK --spar 0.1 -cb -sec`
-+ SAEF-SGDM: `NCCL_IB_DISABLE=1 python main.py --dataset imagenet --data /export/Data/ILSVRC2012/ -p 5005 -a resnet50 -wd 1e-4 --epochs 90 -ds 30 60 -b 256 --method r-TopK --spar 0.1 -cb -sec`
++ SAEF-SGDM: `NCCL_IB_DISABLE=1 python main.py --dataset imagenet --data /export/Data/ILSVRC2012/ -p 5005 -a resnet50 -wd 1e-4 --epochs 90 -ds 30 60 -b 256 --method r-TopK --spar 0.05 -ap 20 -cb -sec`
