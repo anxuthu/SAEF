@@ -22,7 +22,7 @@ import torchvision.datasets as datasets
 import compression
 
 parser = argparse.ArgumentParser(description='PyTorch Training')
-parser.add_argument('--data', default='./data', type=str,
+parser.add_argument('--data', default='/export/Data/cifar/', type=str,
                     help='path to dataset')
 parser.add_argument('--dataset', default='cifar10', type=str,
                     help='(cifar10, cifar100, imagenet)')
@@ -287,6 +287,14 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
         target = target.cuda(args.gpu, non_blocking=True)
         optimizer.zero_grad()
 
+        for idx, p in enumerate(model.parameters()):
+            if args.reset_period and (cur_iter+1) % args.reset_period == 0:
+                residuals[idx].zero_()
+
+            if args.average_period and (cur_iter+1) % args.average_period == 0:
+                dist.all_reduce(residuals[idx], op=dist.ReduceOp.SUM)
+                residuals[idx] /= args.world_size
+
         # step ahead in dist-r
         if args.method.startswith('r-'):
             with torch.no_grad():
@@ -303,13 +311,6 @@ def train(train_loader, model, criterion, optimizer, epoch, args,
                     model.train()
 
                 for idx, p in enumerate(model.parameters()):
-                    if args.reset_period and (cur_iter+1) % args.reset_period == 0:
-                        residuals[idx].zero_()
-
-                    if args.average_period and (cur_iter+1) % args.average_period == 0:
-                        dist.all_reduce(residuals[idx], op=dist.ReduceOp.SUM)
-                        residuals[idx] /= args.world_size
-
                     p.data.sub_(residuals[idx])
 
         # only server evaluate auxiliary variable
