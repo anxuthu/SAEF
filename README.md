@@ -1,7 +1,20 @@
 # SAEF
-Step-ahead local error feedback for communication-efficient distributed training.
+The synthetic codes for paper ["Step-Ahead Error Feedback for Distributed Training with Compressed Gradient"](https://ojs.aaai.org/index.php/AAAI/article/view/17254). [[arxiv](https://ojs.aaai.org/index.php/AAAI/article/view/17254)]
 
-## Software Requirements
+## Citation
+```
+@inproceedings{xu2021step,
+  title={Step-Ahead Error Feedback for Distributed Training with Compressed Gradient},
+  author={Xu, An and Huo, Zhouyuan and Huang, Heng},
+  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},
+  volume={35},
+  number={12},
+  pages={10478--10486},
+  year={2021}
+}
+```
+
+## Tested Environment
 
 Python 3 and PyTorch 1.4
 
