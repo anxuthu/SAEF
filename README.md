@@ -1,5 +1,5 @@
 # SAEF
-The synthetic codes for paper ["Step-Ahead Error Feedback for Distributed Training with Compressed Gradient"](https://ojs.aaai.org/index.php/AAAI/article/view/17254). [[arxiv](https://ojs.aaai.org/index.php/AAAI/article/view/17254)]
+The synthetic codes for paper ["Step-Ahead Error Feedback for Distributed Training with Compressed Gradient"](https://ojs.aaai.org/index.php/AAAI/article/view/17254). [[arxiv](https://arxiv.org/abs/2008.05823)]
 
 ## Citation
 ```
